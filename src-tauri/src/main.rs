@@ -288,7 +288,14 @@ fn in_app(url: &url::Url) -> bool {
 pub fn restrict_to_user(dir: &Path) {
     use std::os::windows::process::CommandExt;
     let root = std::env::var_os("SystemRoot").map(PathBuf::from).unwrap_or_else(|| r"C:\Windows".into());
-    let user = std::env::var("USERNAME").unwrap_or_default();
+    // By SID (`*S-1-5-21-…`): an environment variable can be missing or name someone else.
+    let user = match user_sid() {
+        Some(sid) => format!("*{sid}"),
+        None => {
+            log::warn!("could not read this user's SID; restricting the data folder by user name");
+            std::env::var("USERNAME").unwrap_or_default()
+        }
+    };
     let done = std::process::Command::new(root.join(r"System32\icacls.exe"))
         .arg(dir)
         .args(["/inheritance:r", "/grant:r", &format!("{user}:(OI)(CI)F"), "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F"])
@@ -298,6 +305,35 @@ pub fn restrict_to_user(dir: &Path) {
         Ok(o) if o.status.success() => {}
         Ok(o) => log::warn!("could not restrict the data folder: icacls exit {:?}", o.status.code()),
         Err(e) => log::warn!("could not restrict the data folder: {e}"),
+    }
+}
+
+/// The SID of the user RoALT runs as (`S-1-…`), from its own process token.
+pub fn user_sid() -> Option<String> {
+    use windows::Win32::Foundation::{HANDLE, HLOCAL, LocalFree};
+    use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
+    use windows::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser};
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    // SAFETY: the token handle is ours (closed by Owned); the buffer is u64-aligned, sized by the
+    // first call and holds the TOKEN_USER the second call wrote; the SID string is LocalAlloc'd
+    // by ConvertSidToStringSidW and freed after it is copied.
+    unsafe {
+        let mut token = HANDLE::default();
+        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).ok()?;
+        let token = windows::core::Owned::new(token);
+        let mut len = 0u32;
+        let _ = GetTokenInformation(*token, TokenUser, None, 0, &mut len);
+        if len == 0 {
+            return None;
+        }
+        let mut buf = vec![0u64; (len as usize).div_ceil(8)];
+        GetTokenInformation(*token, TokenUser, Some(buf.as_mut_ptr().cast()), len, &mut len).ok()?;
+        let user = &*buf.as_ptr().cast::<TOKEN_USER>();
+        let mut text = windows::core::PWSTR::null();
+        ConvertSidToStringSidW(user.User.Sid, &mut text).ok()?;
+        let sid = text.to_string().ok();
+        LocalFree(Some(HLOCAL(text.0.cast())));
+        sid.filter(|s| s.starts_with("S-1-"))
     }
 }
 
@@ -534,7 +570,8 @@ fn main() {
                 // The Debug tab (`log://log` events); its history comes from `commands::debug_tail`.
                 .target(Target::new(TargetKind::Webview))
                 .level(log::LevelFilter::Info)
-                .level_for("roalt", log::LevelFilter::Debug)
+                // Debug lines (account ids, local paths) only in debug builds.
+                .level_for("roalt", if cfg!(debug_assertions) { log::LevelFilter::Debug } else { log::LevelFilter::Info })
                 // roalt.log plus the 4 before it, 5 MB each.
                 .max_file_size(5 << 20)
                 .rotation_strategy(RotationStrategy::KeepSome(5))
@@ -706,6 +743,12 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_this_users_sid() {
+        let sid = user_sid().expect("the process token has a user SID");
+        assert!(sid.starts_with("S-1-5-") && sid.split('-').count() >= 4, "{sid}");
+    }
 
     fn temp_dir() -> PathBuf {
         let dir = std::env::temp_dir().join(format!("roalt-datadir-{}", uuid::Uuid::new_v4()));

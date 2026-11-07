@@ -500,9 +500,11 @@ impl Default for Settings {
             anti_afk: AntiAfk::default(),
             discord: DiscordEvents::default(),
             auto_update: false,
-            self_update: true,
-            discord_presence: true,
-            online_count: true,
+            // Hardened build: every network or profile-publishing extra is opt-in. self_update is
+            // off because an upstream release (signed by upstream's key) would replace this build.
+            self_update: false,
+            discord_presence: false,
+            online_count: false,
             minimize_on_launch: false,
 panic_hotkey: String::new(),
             clean_logs: false,

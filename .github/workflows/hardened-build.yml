@@ -1,0 +1,80 @@
+name: Hardened build
+
+# Validates the hardened source and only then builds the installer, on a fresh GitHub-hosted
+# Windows VM. Steps run in order and the first failure stops the job: typecheck + frontend build,
+# Rust unit tests, clippy, npm audit, cargo audit, then the installer. Uploads the installer,
+# roalt.exe, SHA256SUMS.txt and the audit reports. Nothing is signed or published.
+on:
+  workflow_dispatch:
+  push:
+    branches: [hardened]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: 24
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          components: clippy
+      - name: Toolchain versions
+        run: |
+          node --version; npm --version; rustc --version; cargo --version
+          Get-Command perl -All | Select-Object -ExpandProperty Source
+      - name: npm ci (lockfile only; install scripts are listed below)
+        run: npm ci
+      - name: Packages with install scripts
+        continue-on-error: true
+        run: npm query ":attr(scripts, [install]), :attr(scripts, [postinstall]), :attr(scripts, [preinstall])" | ConvertFrom-Json | ForEach-Object { "$($_.name)@$($_.version)" }
+      - name: Typecheck, i18n check and frontend build
+        run: npm run build
+      - name: Rust unit tests
+        run: cargo test --locked
+        working-directory: src-tauri
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+        working-directory: src-tauri
+      - name: npm audit
+        run: |
+          New-Item -ItemType Directory -Force reports | Out-Null
+          npm audit --json | Out-File -Encoding utf8 reports\npm-audit.json
+          npm audit --audit-level=high
+      - name: cargo audit
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit --file src-tauri\Cargo.lock --json | Out-File -Encoding utf8 reports\cargo-audit.json
+          cargo audit --file src-tauri\Cargo.lock
+      - name: Inno Setup 6.6+
+        run: choco upgrade innosetup --no-progress -y
+      - name: Build installer (only after every check above passed)
+        run: powershell -ExecutionPolicy Bypass -File scripts\build-installer.ps1
+      - name: SHA-256 sums
+        run: |
+          $version = (Get-Content -Raw src-tauri\tauri.conf.json | ConvertFrom-Json).version
+          $files = @("dist-installer\RoALT-Setup-$version.exe", "src-tauri\target\release\roalt.exe")
+          $sums = $files | ForEach-Object { "{0}  {1}" -f (Get-FileHash -Algorithm SHA256 $_).Hash.ToLower(), (Split-Path -Leaf $_) }
+          $sums | Out-File -Encoding ascii dist-installer\SHA256SUMS.txt
+          $sums
+          "Built from commit $env:GITHUB_SHA" | Out-File -Encoding ascii -Append dist-installer\SHA256SUMS.txt
+          Copy-Item src-tauri\target\release\roalt.exe dist-installer\
+          $sums | ForEach-Object { "- ``$_``" } | Out-File -Encoding utf8 -Append $env:GITHUB_STEP_SUMMARY
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: RoALT-hardened
+          path: |
+            dist-installer/*
+            reports/*
+          if-no-files-found: error

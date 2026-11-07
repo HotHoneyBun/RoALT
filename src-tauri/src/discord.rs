@@ -1,5 +1,6 @@
 //! Discord alerts (opt-in): what happens to the clients, posted to a webhook the user pastes.
-//! The only host besides Roblox RoALT talks to, and only once a webhook is set.
+//! Talks to discord.com only once a webhook is set. (RoALT's other non-Roblox hosts: GitHub for
+//! updates and News, and the opt-in online counter; see SECURITY.md.)
 //!
 //! The webhook URL holds its token, so it is a secret: kept in the vault (AES-GCM, `DISCORD_AAD`)
 //! as hex in the settings table, never logged, never sent to the UI (only its id's last digits).

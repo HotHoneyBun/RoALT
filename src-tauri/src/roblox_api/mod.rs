@@ -617,6 +617,12 @@ impl Client {
         cookie: Option<&Secret>,
     ) -> Result<Reply> {
         let account_id = if cookie.is_some() { account_id } else { 0 };
+        // The cookie only ever goes to Roblox itself, whatever URL a caller builds (checked on the
+        // real URL, before a test's `base` replaces the host).
+        if cookie.is_some() && !cookie_host(url) {
+            log::error!("refused to send a Roblox cookie to a URL outside roblox.com ({route})");
+            return Err(AppError::Internal("refused to send a Roblox cookie outside roblox.com".into()));
+        }
         let http = self.http.as_ref().map_err(|e| AppError::Internal(tr!("HTTP client unavailable: {why}", why = e)))?;
         let (url, web) = self.target(url)?;
         let (mut rotated, mut csrf_retried, mut attempts) = (None::<Secret>, false, 0);
@@ -814,6 +820,38 @@ fn rotated_cookie(h: &HeaderMap) -> Option<Secret> {
         (!deleted).then(|| Secret::new(value))
     };
     h.get_all(SET_COOKIE).iter().filter_map(|v| v.to_str().ok()).filter_map(parse).next_back()
+}
+
+/// Where `.ROBLOSECURITY` may be sent (pure): https on the default port, no userinfo, and the host
+/// `roblox.com` or a subdomain of it.
+fn cookie_host(url: &str) -> bool {
+    Url::parse(url).is_ok_and(|u| {
+        u.scheme() == "https"
+            && u.port().is_none()
+            && u.username().is_empty()
+            && u.password().is_none()
+            && u.host_str().is_some_and(|h| h == "roblox.com" || h.ends_with(".roblox.com"))
+    })
+}
+
+#[cfg(test)]
+#[test]
+fn the_cookie_goes_only_to_roblox() {
+    for ok in [endpoints::USERS_AUTHENTICATED, endpoints::AUTH_TICKET, endpoints::SHARE_LINK, "https://roblox.com/x", "https://WWW.Roblox.com/x"] {
+        assert!(cookie_host(ok), "{ok}");
+    }
+    for bad in [
+        "http://users.roblox.com/v1/users/authenticated",
+        "https://roblox.com.evil.example/",
+        "https://evilroblox.com/",
+        "https://users.roblox.com:8443/",
+        "https://x@users.roblox.com/",
+        "https://setup.rbxcdn.com/",
+        "https://127.0.0.1/",
+        "not a url",
+    ] {
+        assert!(!cookie_host(bad), "{bad}");
+    }
 }
 
 fn cookie_header(cookie: &Secret) -> Result<HeaderValue> {

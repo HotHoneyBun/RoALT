@@ -7,6 +7,9 @@ on:
   release:
     types: [released]
 
+# The job needs no GITHUB_TOKEN rights: it acts with WINGET_TOKEN only.
+permissions: {}
+
 jobs:
   publish:
     runs-on: windows-latest
@@ -16,7 +19,8 @@ jobs:
       - name: Skipped without WINGET_TOKEN
         if: env.HAS_TOKEN != 'true'
         run: echo "WINGET_TOKEN isn't set; not publishing to winget."
-      - uses: vedantmgoyal9/winget-releaser@main
+      # Pinned to a commit (v2, 2026-10-07): a moving branch must not receive WINGET_TOKEN.
+      - uses: vedantmgoyal9/winget-releaser@b7370d4d152efdce803a26cc6ca9eee58cb2ad54 # v2
         if: env.HAS_TOKEN == 'true'
         with:
           identifier: inspectsoftware.RoALT
